@@ -9,9 +9,10 @@ and eventually linked into Titan.
 ## Project status
 
 This repository is still being set up. The existing source contains preliminary
-utilities and API stubs; it is not yet a working RTOS. Building the library does
-not provide a scheduler, working synchronization primitives, a bootable image,
-or a tested dual-core system.
+utilities, synchronization primitives, and API stubs; it is not yet a working
+RTOS. Building the library does not provide a scheduler, a bootable image, or a
+tested dual-core system. The synchronization primitives require a scheduler and
+platform port before they can be used on the STM32.
 
 The intended scope includes threads, scheduling, synchronization, and time and
 system utilities. The original [design notes](docs/design-notes.md) capture
@@ -21,21 +22,23 @@ ideas and open questions, not settled implementation decisions.
 
 - Define the threading and scheduling model, then implement thread management
   and context switching for both cores.
-- Design and implement synchronization primitives and cross-core coordination,
-  accounting for interrupts, shared memory, and the M7 cache.
+- Implement the synchronization port for the scheduler and STM32, including
+  cross-core coordination, shared memory, and the M7 cache.
 - Add timekeeping, sleeping, and system utilities.
 - Establish the startup, interrupt, vector-table, and memory-layout requirements
   for applications using the RTOS.
-- Add host tests for hardware-independent logic and board tests for timing,
-  interrupts, context switching, and dual-core behavior.
+- Expand host tests and add board tests for timing, interrupts, context
+  switching, and dual-core behavior.
 - Integrate the library with Titan and validate it on the target hardware.
 
 ## Repository layout
 
-- `os/include/os/` — draft public interfaces.
-- `os/src/` — preliminary source and internal utilities.
+- `include/os/` — draft public interfaces.
+- `src/` — implementation, grouped by component.
+- `internal/` — private headers, grouped to match the source.
 - `cmake/` — standalone Arm cross-compilation toolchain.
 - `docs/` — working design notes.
+- `tests/` — host tests and a test-only synchronization port.
 
 ## Building
 
@@ -75,9 +78,9 @@ flash a board or provide startup code, vector tables, or a linker script.
 
 ## Testing
 
-There are no tests configured yet. `./build.sh test` reports this until a host
-test suite is added. Once configured, host tests will run independently of the
-Arm cross-builds in `build-host/` and require a native C compiler.
+`./build.sh test` builds and runs the synchronization tests with a native C
+compiler and POSIX threads in `build-host/`, independently of the Arm
+cross-builds. The host port is for testing and is not an STM32 implementation.
 
 As the RTOS grows, scheduling decisions, queues, time calculations, and other
 hardware-independent logic can be tested on the host, with fakes where needed.
@@ -85,6 +88,72 @@ The STM32 will still be needed to validate startup, interrupts, context
 switches, actual peripheral behavior, timing, and cross-core synchronization,
 including memory ordering and cache effects. Host tests alone cannot establish
 that those behaviors work on the board.
+
+## Synchronization primitives
+
+The library provides a manual-reset, level-triggered event (`os_await`,
+`os_raise`, `os_reset_event`), a non-recursive thread-owned mutex (`os_acquire`,
+`os_release`), a counting semaphore (`os_take`, `os_give`), and one-shot and
+reusable barriers (`os_barrier_wait`, `os_reusable_barrier_wait`). Initializer
+macros and operation details are in their respective headers under `include/os/`.
+
+Event, mutex, and semaphore timeouts are in milliseconds: `OS_NO_WAIT` polls,
+`OS_WAIT_FOREVER` waits indefinitely, and positive values give a relative
+timeout. Barriers wait indefinitely. A raised event stays raised until reset;
+resetting it before a woken thread reacquires the lock can cause that thread to
+wait again. Barriers require a nonzero participant count, and participants must
+call the reusable barrier once per round. No fairness or priority inheritance is
+currently guaranteed. Objects must not be reinitialized while in use, and a
+thread must release its mutexes before exiting.
+
+These APIs are for thread context, not interrupt handlers. They require the
+functions declared in `os/port/sync.h`: globally unique current-thread identity,
+a shared monotonic clock, an internal lock, and atomic scheduler wait/wake
+operations. No STM32 port or scheduler implementation is supplied yet; linking
+an application that uses these primitives therefore requires those functions.
+The host tests use a POSIX port solely to exercise the portable logic.
+
+On STM32H745, synchronization objects and protected shared data need to reside
+in memory accessible and coherent to both cores. The port must supply the
+necessary cross-core exclusion, interrupt/preemption handling, memory ordering,
+and M7 cache/MPU configuration. See ST's [inter-processor communication guide
+(AN5617)](https://www.st.com/resource/en/application_note/an5617-stm32h745755-and-stm32h747757-lines-interprocessor-communications-stmicroelectronics.pdf).
+
+### Atomic operations and Peterson's lock
+
+`os/atomic.h` provides 32-bit load, store, exchange, compare-exchange, and
+fetch-and-modify operations. Their implementation in `src/atomic/atomic.c` uses one
+global Peterson lock; the old `atomic_cmp_xchg` delegates to the
+same implementation. Arithmetic wraps as unsigned 32-bit arithmetic. Every
+concurrent access to a protected word must use this atomic API, and the word
+must be naturally aligned and coherent to both cores.
+
+By default, linking `titan_rtos::titan_rtos` adds the linker fragment
+`cmake/stm32h745-shared-sram4.ld`. It reserves 32 bytes at
+`0x3800ffe0–0x3800ffff`, at the end of SRAM4, and defines
+`os_atomic_shared_state` there. The application linker script must define the
+full 64 KiB `SRAM4` memory region; overlapping allocations cause a link error.
+Use the fragment in **both** core images. To manage the reservation in a custom
+linker script, set `TITAN_RTOS_RESERVE_SRAM4=OFF` and define the symbol at the
+same coherent shared-RAM address in both images.
+
+The reserved section is not initialized automatically. Before either core uses
+atomics, startup must initialize the state to zero exactly once and coordinate
+both cores so the other core cannot access it early or clear it again. Configure
+the M7 MPU/cache for coherence (for example, make the region non-cacheable).
+The reservation alone does not perform startup coordination or MPU setup.
+These operations have not yet been validated on hardware.
+
+The STM32 atomic port disables local interrupts while taking the lock and uses
+memory barriers; NMI and fault handlers must not use it. Same-core nesting is
+supported, but the lock must never be held across a blocking operation. The
+synchronization primitives use atomic operations for their 32-bit state and the
+scheduler port's lock to coordinate that state with wait/wake operations. The
+mutex owner and reusable barrier generation are protected by the scheduler lock.
+The future scheduler port can use the Peterson lock for this handshake, provided
+it enrolls the waiter and releases the lock atomically before blocking. If it
+uses a separate lock, code must acquire that lock before the Peterson lock and
+must not acquire it while already holding the Peterson lock.
 
 ## Using the library from another CMake project
 

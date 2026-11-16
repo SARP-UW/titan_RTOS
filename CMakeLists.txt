@@ -19,23 +19,33 @@ else()
 endif()
 
 add_library(titan_rtos STATIC
-  os/src/debug.c
-  os/src/error.c
-  os/src/event.c
-  os/src/mutex.c
-  os/src/semaphore.c
-  os/src/sys.c
-  os/src/thread.c
-  os/src/time.c
-  os/src/internal/lang_util.c
-  os/src/internal/mmio.c
-  os/src/internal/sys_util.c
+  src/atomic/atomic.c
+  src/atomic/atomic_port_stm32.c
+  src/sync/barrier.c
+  src/sync/event.c
+  src/sync/mutex.c
+  src/sync/semaphore.c
+  src/system/debug.c
+  src/system/error.c
+  src/system/sys.c
+  src/system/lang_util.c
+  src/system/mmio.c
+  src/system/sys_util.c
+  src/thread/thread.c
+  src/time/time.c
 )
 add_library(titan_rtos::titan_rtos ALIAS titan_rtos)
 
+option(TITAN_RTOS_RESERVE_SRAM4 "Reserve SRAM4 for the shared atomic lock" ON)
+if(TITAN_RTOS_RESERVE_SRAM4)
+  set(titan_rtos_shared_linker_script "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stm32h745-shared-sram4.ld")
+  target_link_options(titan_rtos INTERFACE "LINKER:-T,${titan_rtos_shared_linker_script}")
+  set_property(TARGET titan_rtos APPEND PROPERTY INTERFACE_LINK_DEPENDS "${titan_rtos_shared_linker_script}")
+endif()
+
 target_include_directories(titan_rtos
-  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/os/include"
-  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/os/src"
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
 )
 target_compile_features(titan_rtos PUBLIC c_std_17)
 set_target_properties(titan_rtos PROPERTIES C_EXTENSIONS ON)
